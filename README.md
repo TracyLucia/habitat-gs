@@ -58,6 +58,24 @@ In practice, Habitat-GS can:
 
 Compared with traditional mesh-based simulators, Habitat-GS can achieve photo-realistic rendering and render high-fidelity gaussian avatars with high efficiency. By introducing Gaussian Splatting to embodied simulators, we hope our work can facilitate future embodied AI research.
 
+## 📖 Table of Contents
+
+- 🛠️ [Install Habitat-GS](#%EF%B8%8F-install-habitat-gs)
+  - 🧪 [Create the environment](#-create-the-environment)
+  - 📦 [Install Habitat-GS](#-install-habitat-gs)
+  - 🤖 [Install Habitat-Lab](#-install-habitat-lab-optional-but-recommended)
+- 📦 [Download GS Asset](#-download-gs-asset)
+- 🚀 [Run Habitat-GS](#-run-habitat-gs)
+  - 🧱 [Prepare GS Assets](#-prepare-gs-assets)
+  - 🗂️ [Organize Scene Dataset](#%EF%B8%8F-organize-scene-dataset)
+  - 🖥️ [Run Interactive Viewer](#%EF%B8%8F-run-interactive-viewer)
+- 🦞 [HabitatAgent](#-habitatagent)
+- 🏋️ [Train/Eval Navigation Agents on Habitat-GS](#%EF%B8%8F-traineval-navigation-agents-on-habitat-gs)
+  - 🗺️ [Point/Image/Object Goal Navigation on Habitat-Lab](#%EF%B8%8F-pointimageobject-goal-navigation-on-habitat-lab)
+  - 🗣️ [Vision-and-Language Navigation with StreamVLN](#%EF%B8%8F-vision-and-language-navigation-with-streamvln)
+  - ✈️ [Vision-and-Language Navigation with Uni-NaVid](#%EF%B8%8F-vision-and-language-navigation-with-uni-navid)
+- 📚 [Citation](#-citation)
+
 ## 🛠️ Install Habitat-GS
 
 ### 🧪 Create the environment
@@ -110,7 +128,7 @@ pip install -e habitat-baselines
 
 ## 📦 Download GS Asset
 
-Please refer to our [🤗 huggingface dataset](https://huggingface.co/datasets/RukawaY/gs_scenes) for more details. We provide five categories of assets:
+Please refer to our 🤗 [huggingface dataset](https://huggingface.co/datasets/RukawaY/gs_scenes) for more details. We provide five categories of assets:
 
 |   | Category | Size | Required For |
 |---|----------|------|-------------|
