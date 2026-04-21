@@ -48,10 +48,19 @@ ACT_RIGHT = 3
 # Navigation parameters (must match StreamVLN config)
 FORWARD_STEP = 0.25     # metres
 TURN_ANGLE = 15.0        # degrees
-TURN_THRESHOLD = 7.5     # degrees – if heading error < this, move forward
+TURN_THRESHOLD = 14.5    # degrees – slightly below TURN_ANGLE to guarantee recovery after a turn
 WAYPOINT_RADIUS = 0.5    # metres – advance to next waypoint when closer
 LAST_WP_RADIUS = 0.25   # tighter radius for the final waypoint
 MAX_STEPS = 498          # max steps per episode (matches StreamVLN)
+
+# Progress-based stuck detection
+NO_PROGRESS_LIMIT = 10          # abandon waypoint after this many steps without improvement
+PROGRESS_EPS = 0.02             # m — distance improvement considered real progress
+
+# Post-trajectory quality filter – reject videos that look stuck.
+MIN_MOVING_FRAME_RATIO = 0.55   # at least 55% of frames must show >PROGRESS_EPS movement
+MAX_FINAL_GOAL_DIST = 2.0       # trajectory must end within 2m of the goal
+MIN_TRAJECTORY_FRAMES = 2       # reject ultra-short trajectories; matches ep-gen DRY_MIN_FRAMES under GS_EXTREME_RELAX
 
 # Rendering
 RENDER_W = 640
@@ -85,10 +94,18 @@ def heading_from_quat(q):
 
 
 def desired_heading(src, tgt):
-    """Heading angle from src to tgt (habitat: -Z forward, Y up)."""
+    """Heading the agent needs to face tgt from src.
+
+    Habitat: default forward is -Z, so a Y-rotation by h maps local -Z to
+    world (-sin h, 0, -cos h). For this to point toward tgt we need
+    sin h = -(tgt.x - src.x) and cos h = -(tgt.z - src.z), hence
+    atan2(-dx, -dz). The previous atan2(dx, -dz) was 180° off and caused
+    the follower to walk directly away from every waypoint — the root
+    cause of the stuck-in-corner trajectories.
+    """
     dx = tgt[0] - src[0]
     dz = tgt[2] - src[2]
-    return math.atan2(dx, -dz)
+    return math.atan2(-dx, -dz)
 
 
 def angle_diff(a, b):
@@ -149,7 +166,17 @@ ACTION_NAME = {ACT_FORWARD: "move_forward", ACT_LEFT: "turn_left", ACT_RIGHT: "t
 def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
     """
     Follow the reference_path using a greedy heading-based controller.
-    Saves RGB frames and returns annotation dict, or None on failure.
+
+    Strategy:
+      * Track per-waypoint best (smallest) xz-distance; if we haven't made
+        real progress for NO_PROGRESS_LIMIT consecutive steps, abandon that
+        waypoint. This handles both "forward into wall" stuck patterns AND
+        turn-oscillation patterns that the old position-delta check missed.
+      * Buffer frames in memory; only write to disk AFTER the post-trajectory
+        quality filter passes, so rejected trajectories don't leave orphan
+        image dirs on disk.
+
+    Returns annotation dict on success, None if the trajectory is rejected.
     """
     import quaternion as _quat  # noqa
 
@@ -165,28 +192,26 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
     ref_path = episode["reference_path"]
     scene_name = episode["scene_id"].split("/")[-2]
     ep_id = int(episode["episode_id"])
-
-    # Create output directory
     ep_name = f"{scene_name}_gs_{ep_id:06d}"
-    rgb_dir = os.path.join(output_dir, "images", ep_name, "rgb")
-    os.makedirs(rgb_dir, exist_ok=True)
 
-    actions = [-1]  # StreamVLN convention: initial marker
-    frame_count = 0
-    next_wp = 1  # start navigating towards waypoint 1
+    actions: List[int] = [-1]   # StreamVLN convention: initial marker
+    frames: List[np.ndarray] = []  # RGB frames held in memory until accepted
+    positions: List[np.ndarray] = []  # xz-positions aligned with frames
+    next_wp = 1                   # start navigating towards waypoint 1
 
-    # Save initial frame
+    # Save initial frame into memory
     obs = sim.get_sensor_observations()
     rgb = obs["color_sensor"]
     if rgb.ndim == 3 and rgb.shape[-1] == 4:
         rgb = rgb[:, :, :3]
-    Image.fromarray(rgb).save(os.path.join(rgb_dir, f"{frame_count + 1:03d}.jpg"))
-    frame_count += 1
+    frames.append(rgb)
+    positions.append(state.position.copy())
 
-    stuck_count = 0
-    prev_pos = None
+    # Progress tracking for the current waypoint
+    best_wp_dist = xz_dist(state.position, ref_path[next_wp]) if next_wp < len(ref_path) else 0.0
+    no_progress = 0
 
-    while next_wp < len(ref_path) and frame_count < MAX_STEPS:
+    while next_wp < len(ref_path) and len(frames) < MAX_STEPS:
         state = agent.get_state()
         pos = state.position
         cur_heading = heading_from_quat(state.rotation)
@@ -197,9 +222,10 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
         # Check if we've reached the current waypoint
         if xz_dist(pos, ref_path[next_wp]) < radius:
             next_wp += 1
-            stuck_count = 0
             if next_wp >= len(ref_path):
                 break
+            best_wp_dist = xz_dist(pos, ref_path[next_wp])
+            no_progress = 0
             continue
 
         # Compute desired heading towards waypoint
@@ -216,36 +242,46 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
         # Execute action
         sim.step(ACTION_NAME[action])
 
-        # Stuck detection (before recording, so we can skip cleanly)
+        # Progress check: if current waypoint distance has dropped by at least
+        # PROGRESS_EPS from the best seen, keep going; otherwise increment the
+        # no-progress counter and abandon after NO_PROGRESS_LIMIT steps.
         new_state = agent.get_state()
         new_pos = new_state.position
-        if prev_pos is not None and np.linalg.norm(new_pos - prev_pos) < 0.001 and action == ACT_FORWARD:
-            stuck_count += 1
-            if stuck_count > 30:
+        new_wp_dist = xz_dist(new_pos, ref_path[next_wp])
+        if new_wp_dist < best_wp_dist - PROGRESS_EPS:
+            best_wp_dist = new_wp_dist
+            no_progress = 0
+        else:
+            no_progress += 1
+            if no_progress > NO_PROGRESS_LIMIT:
                 next_wp += 1
-                stuck_count = 0
                 if next_wp >= len(ref_path):
                     break
+                best_wp_dist = xz_dist(new_pos, ref_path[next_wp])
+                no_progress = 0
                 continue
-        else:
-            stuck_count = 0
-        prev_pos = new_pos.copy()
 
-        # Record action and save frame (kept in sync)
+        # Record action and frame (kept in sync with positions)
         actions.append(action)
         obs = sim.get_sensor_observations()
         rgb = obs["color_sensor"]
         if rgb.ndim == 3 and rgb.shape[-1] == 4:
             rgb = rgb[:, :, :3]
-        Image.fromarray(rgb).save(os.path.join(rgb_dir, f"{frame_count + 1:03d}.jpg"))
-        frame_count += 1
+        frames.append(rgb)
+        positions.append(new_pos.copy())
 
-    # Validate trajectory
-    if len(actions) < 4:
-        return None  # too short
+    # Sanity check only — all quality filtering happens at episode generation
+    # via the dry-run follower, which must mirror this script's navigation
+    # constants exactly. If this assertion fires, the two drifted out of sync.
+    n_frames = len(frames)
+    if n_frames < MIN_TRAJECTORY_FRAMES or len(actions) != n_frames:
+        return None
 
-    assert len(actions) == frame_count, \
-        f"Mismatch: {len(actions)} actions vs {frame_count} frames"
+    # --- Flush frames to disk -----------------------------------------
+    rgb_dir = os.path.join(output_dir, "images", ep_name, "rgb")
+    os.makedirs(rgb_dir, exist_ok=True)
+    for i, rgb in enumerate(frames):
+        Image.fromarray(rgb).save(os.path.join(rgb_dir, f"{i + 1:03d}.jpg"))
 
     instructions = episode["instruction"]
     if isinstance(instructions, dict):
@@ -342,11 +378,9 @@ def main():
         annotations = []
         # Load existing annotations if resuming
         anno_path = os.path.join(output_dir, f"annotations_{split}{suffix}.json")
-        done_ids = set()
         if args.resume and os.path.exists(anno_path):
             with open(anno_path) as f:
                 annotations = json.load(f)
-            done_ids = {a["id"] for a in annotations}
             print(f"  Loaded {len(annotations)} existing annotations from {anno_path}")
 
         for si, (scene_id, scene_eps) in enumerate(scenes.items()):
@@ -362,9 +396,15 @@ def main():
 
             print(f"\n  [{si+1}/{len(scenes)}] {scene_name} ({len(scene_eps)} episodes)")
 
-            # Filter already-done episodes
+            # Filter already-done episodes.
+            # Episode IDs (int) are NOT globally unique across scenes (each
+            # scene starts from 0 in its own worker), so we must scope the
+            # done-check to THIS scene only — use the video path prefix.
             if args.resume:
-                scene_eps = [e for e in scene_eps if int(e["episode_id"]) not in done_ids]
+                scene_prefix = f"images/{scene_name}_gs_"
+                scene_done = {a["id"] for a in annotations
+                              if a.get("video", "").startswith(scene_prefix)}
+                scene_eps = [e for e in scene_eps if int(e["episode_id"]) not in scene_done]
                 if not scene_eps:
                     print(f"    All episodes already done")
                     continue

@@ -56,13 +56,70 @@ OUTPUT_ROOT = PROJECT_ROOT / "data" / "scene_datasets" / "gs_scenes" / "episodes
 # ═══════════════════════════════════════════════════════════════════════
 #  Episode quality parameters
 # ═══════════════════════════════════════════════════════════════════════
-ISLAND_RADIUS_LIMIT = 2.0       # min navigable-island radius (m) – avoids tiny fragments
+ISLAND_RADIUS_LIMIT = 2.5       # min navigable-island radius (m)
 MIN_GEO_DIST = 5.0              # min geodesic distance (m)
-MAX_GEO_DIST = 80.0             # max geodesic distance (m)
-MIN_WAYPOINTS = 4               # min reference_path waypoints after subsampling
-GEO_EUCLID_MIN_RATIO = 1.05    # reject near-straight-line paths
+MAX_GEO_DIST = 60.0             # max geodesic distance (m)
+MIN_WAYPOINTS = 3               # min reference_path waypoints (raw pathfinder corners)
+GEO_EUCLID_MIN_RATIO = 1.08     # geodesic must be ≥8% longer than euclidean
 WAYPOINT_SPACING = 2.0          # subsample reference_path to ~2 m spacing
-HEIGHT_DIFF_LIMIT = 0.5         # max |Δy| between start and goal (m)
+HEIGHT_DIFF_LIMIT = 3.5         # max |Δy| between start and goal (m) — multi-floor scenes allowed
+
+# Path-shape constraints — catch "agent walks straight for 60m" trajectories.
+MIN_TOTAL_TURN_DEG = 30.0       # sum of |segment-to-segment| angle changes
+MIN_MAX_TURN_DEG = 15.0         # at least one inter-segment bend must exceed this
+
+# Execution-quality constraints
+DRY_FORWARD_STEP = 0.25
+DRY_TURN_ANGLE = 15.0
+DRY_TURN_THRESHOLD = 14.5
+DRY_WAYPOINT_RADIUS = 0.5
+DRY_LAST_WP_RADIUS = 0.25
+DRY_NO_PROGRESS_LIMIT = 10
+DRY_PROGRESS_EPS = 0.02
+DRY_MAX_STEPS = 498
+DRY_MIN_FRAMES = 8              # min trajectory length in frames
+DRY_MIN_MOVING_RATIO = 0.55     # at least 55% of frames show movement >2cm
+DRY_MAX_FINAL_GOAL_DIST = 2.0   # final position must be within 2m of goal
+
+# Clearance constraints
+MIN_ENDPOINT_CLEARANCE = 0.4    # was 0.6 — too conservative for small scenes (<500m²)
+MIN_WAYPOINT_CLEARANCE = 0.25   # was 0.35
+MIN_AVG_PATH_CLEARANCE = 0.4    # was 0.5
+CLEARANCE_QUERY_RADIUS = 2.0    # search cap for distance_to_closest_obstacle
+
+# Fallback relaxation for tiny/tight scenes that couldn't hit the target
+# with the default filter. Activate with env var GS_RELAX=1. Must come AFTER
+# all default definitions so it actually overrides them. GS_EXTREME_RELAX=1
+# goes even further — keeps only the dry-run-reaches-goal check so that
+# tiny scenes (<100m²) can produce 200 eps.
+if os.environ.get("GS_RELAX") == "1" or os.environ.get("GS_EXTREME_RELAX") == "1":
+    ISLAND_RADIUS_LIMIT = 1.0
+    MIN_GEO_DIST = 2.0
+    MIN_WAYPOINTS = 2
+    GEO_EUCLID_MIN_RATIO = 1.0
+    HEIGHT_DIFF_LIMIT = 5.0
+    MIN_ENDPOINT_CLEARANCE = 0.2
+    MIN_WAYPOINT_CLEARANCE = 0.1
+    MIN_AVG_PATH_CLEARANCE = 0.2
+    MIN_TOTAL_TURN_DEG = 10.0
+    MIN_MAX_TURN_DEG = 5.0
+    DRY_MIN_MOVING_RATIO = 0.3
+    DRY_MAX_FINAL_GOAL_DIST = 3.0
+
+if os.environ.get("GS_EXTREME_RELAX") == "1":
+    ISLAND_RADIUS_LIMIT = 0.3
+    MIN_GEO_DIST = 0.5
+    MIN_WAYPOINTS = 2
+    GEO_EUCLID_MIN_RATIO = 1.0
+    HEIGHT_DIFF_LIMIT = 15.0
+    MIN_ENDPOINT_CLEARANCE = 0.05
+    MIN_WAYPOINT_CLEARANCE = 0.02
+    MIN_AVG_PATH_CLEARANCE = 0.05
+    MIN_TOTAL_TURN_DEG = 0.0
+    MIN_MAX_TURN_DEG = 0.0
+    DRY_MIN_FRAMES = 2              # accept very short trajectories
+    DRY_MIN_MOVING_RATIO = 0.1
+    DRY_MAX_FINAL_GOAL_DIST = 5.0
 
 NUM_TRAIN_EPISODES = 200
 NUM_VAL_EPISODES = 50
@@ -183,6 +240,125 @@ def _shortest_path(pf, a, b):
     return p.geodesic_distance, [list(x) for x in p.points]
 
 
+def _clearance(pf, pt, max_radius: float = CLEARANCE_QUERY_RADIUS) -> float:
+    """Distance (m) from *pt* to the nearest navmesh boundary, capped at max_radius."""
+    try:
+        return float(pf.distance_to_closest_obstacle(list(pt), max_radius))
+    except Exception:
+        return 0.0
+
+
+def _xz_dist(a, b) -> float:
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def _heading_from_quat_np(q) -> float:
+    """Extract Y-axis heading from numpy quaternion (w,x,y,z)."""
+    return 2 * math.atan2(q.y, q.w)
+
+
+def _desired_heading(src, tgt) -> float:
+    """Same convention as generate_vln_trajectories.py: atan2(-dx, -dz)."""
+    return math.atan2(-(tgt[0] - src[0]), -(tgt[2] - src[2]))
+
+
+def _angle_diff(a, b) -> float:
+    d = a - b
+    while d > math.pi:  d -= 2 * math.pi
+    while d < -math.pi: d += 2 * math.pi
+    return d
+
+
+def dry_run_trajectory(sim, start_pos, start_rot_xyzw, ref_path):
+    """Simulate greedy follower on navmesh (no rendering). Returns a tuple
+    (moving_ratio, final_goal_dist, n_frames). Mirrors follow_path() in
+    generate_vln_trajectories.py so that filter decisions here match what
+    that script would produce at trajectory-generation time."""
+    import quaternion as _quat  # noqa: registers np.quaternion
+    agent = sim.get_agent(0)
+    state = agent.get_state()
+    state.position = np.array(start_pos, dtype=np.float32)
+    state.rotation = np.quaternion(start_rot_xyzw[3], start_rot_xyzw[0],
+                                   start_rot_xyzw[1], start_rot_xyzw[2])
+    agent.set_state(state)
+
+    positions = [state.position.copy()]
+    next_wp = 1
+    if next_wp >= len(ref_path):
+        return 0.0, 0.0, len(positions)
+    best_wp_dist = _xz_dist(state.position, ref_path[next_wp])
+    no_progress = 0
+
+    while next_wp < len(ref_path) and len(positions) < DRY_MAX_STEPS:
+        state = agent.get_state()
+        pos = state.position
+        cur_h = _heading_from_quat_np(state.rotation)
+        radius = DRY_LAST_WP_RADIUS if next_wp == len(ref_path) - 1 else DRY_WAYPOINT_RADIUS
+        if _xz_dist(pos, ref_path[next_wp]) < radius:
+            next_wp += 1
+            if next_wp >= len(ref_path):
+                break
+            best_wp_dist = _xz_dist(pos, ref_path[next_wp])
+            no_progress = 0
+            continue
+
+        target = ref_path[next_wp]
+        dh = _angle_diff(_desired_heading(pos, target), cur_h)
+        if abs(dh) > math.radians(DRY_TURN_THRESHOLD):
+            action = "turn_left" if dh > 0 else "turn_right"
+        else:
+            action = "move_forward"
+        sim.step(action)
+        new_pos = agent.get_state().position
+        new_wp_dist = _xz_dist(new_pos, ref_path[next_wp])
+        if new_wp_dist < best_wp_dist - DRY_PROGRESS_EPS:
+            best_wp_dist = new_wp_dist
+            no_progress = 0
+        else:
+            no_progress += 1
+            if no_progress > DRY_NO_PROGRESS_LIMIT:
+                next_wp += 1
+                if next_wp >= len(ref_path):
+                    break
+                best_wp_dist = _xz_dist(new_pos, ref_path[next_wp])
+                no_progress = 0
+                continue
+        positions.append(new_pos.copy())
+
+    n = len(positions)
+    if n < 2:
+        return 0.0, float("inf"), n
+    moving = sum(1 for i in range(1, n)
+                 if float(np.linalg.norm(positions[i] - positions[i - 1])) > DRY_PROGRESS_EPS)
+    moving_ratio = moving / (n - 1)
+    final_dist = _xz_dist(positions[-1], ref_path[-1])
+    return moving_ratio, final_dist, n
+
+
+def _turn_angles(wps: list) -> Tuple[float, float]:
+    """Return (total_abs_turn, max_abs_turn) in degrees for a sequence of
+    waypoints in XZ plane. A straight line has both = 0. A right-angle
+    corner contributes 90° to each value once."""
+    if len(wps) < 3:
+        return 0.0, 0.0
+    segs = [np.array([wps[i + 1][0] - wps[i][0], wps[i + 1][2] - wps[i][2]], dtype=np.float64)
+            for i in range(len(wps) - 1)]
+    total = 0.0
+    max_abs = 0.0
+    for i in range(1, len(segs)):
+        n0 = float(np.linalg.norm(segs[i - 1]))
+        n1 = float(np.linalg.norm(segs[i]))
+        if n0 < 1e-6 or n1 < 1e-6:
+            continue
+        cos_t = float(np.dot(segs[i - 1], segs[i]) / (n0 * n1))
+        cos_t = max(-1.0, min(1.0, cos_t))
+        ang = math.degrees(math.acos(cos_t))
+        total += ang
+        if ang > max_abs:
+            max_abs = ang
+    return total, max_abs
+
+
 def _subsample_waypoints(wps: list, spacing: float = WAYPOINT_SPACING) -> list:
     """Keep start, then a point every ~spacing metres, then end."""
     if len(wps) <= 2:
@@ -200,8 +376,18 @@ def _subsample_waypoints(wps: list, spacing: float = WAYPOINT_SPACING) -> list:
 
 
 def _heading(a, b):
-    """Heading angle (rad) from position a looking towards b.  habitat: -Z forward, Y up."""
-    return math.atan2(b[0] - a[0], -(b[2] - a[2]))
+    """Heading angle (rad) at which an agent at *a* will face *b*.
+
+    Habitat convention: default agent forward is world -Z; a positive
+    Y-rotation by angle h maps local -Z to world (-sin h, 0, -cos h).
+    For that direction to point from a toward b we need sin h = -(b.x - a.x)
+    and cos h = -(b.z - a.z), i.e. h = atan2(-dx, -dz).
+
+    The prior formula (atan2(dx, -dz)) is off by π, which made agents walk
+    AWAY from their goal and was the root cause of the "stuck in corner"
+    trajectories the user observed.
+    """
+    return math.atan2(-(b[0] - a[0]), -(b[2] - a[2]))
 
 
 def _heading_to_quat(h):
@@ -209,13 +395,32 @@ def _heading_to_quat(h):
     return [0.0, float(math.sin(h / 2)), 0.0, float(math.cos(h / 2))]
 
 
-def sample_paths(pf, num: int, seed: int) -> List[dict]:
-    """Sample start/goal pairs from the navmesh and compute shortest paths."""
+def sample_paths(sim, num: int, seed: int) -> List[dict]:
+    """Sample start/goal pairs from the navmesh and compute shortest paths.
+
+    Accepts a Simulator (with pathfinder + action_space configured) so it can
+    run a dry-run greedy follower per candidate path and reject those the
+    trajectory generator couldn't navigate (stuck, oscillating, can't reach).
+    """
+    pf = sim.pathfinder
     np.random.seed(seed)
     pf.seed(seed)
     episodes: List[dict] = []
     attempts = 0
-    max_attempts = num * 1000
+    # Allow more attempts in relaxed mode since tiny scenes need lots of
+    # sampling to eke out 200 valid paths.
+    if os.environ.get("GS_EXTREME_RELAX") == "1":
+        max_attempts = num * 20000
+    elif os.environ.get("GS_RELAX") == "1":
+        max_attempts = num * 5000
+    else:
+        max_attempts = num * 1000
+
+    # Per-reason counters for debugging quality filtering
+    reject = {"island": 0, "clearance_end": 0, "height": 0, "geo": 0, "wps": 0,
+              "straight": 0, "clearance_wp": 0, "clearance_avg": 0,
+              "turn_total": 0, "turn_max": 0,
+              "dry_frames": 0, "dry_moving": 0, "dry_goal": 0}
 
     while len(episodes) < num and attempts < max_attempts:
         if _shutdown:
@@ -225,41 +430,102 @@ def sample_paths(pf, num: int, seed: int) -> List[dict]:
         # --- sample goal ---
         tgt = np.array(pf.get_random_navigable_point(), dtype=np.float64)
         if np.isnan(tgt).any() or pf.island_radius(tgt) < ISLAND_RADIUS_LIMIT:
+            reject["island"] += 1
+            continue
+        if _clearance(pf, tgt) < MIN_ENDPOINT_CLEARANCE:
+            reject["clearance_end"] += 1
             continue
 
         # --- try several sources for this goal ---
         for _ in range(20):
             src = np.array(pf.get_random_navigable_point(), dtype=np.float64)
             if np.isnan(src).any() or pf.island_radius(src) < ISLAND_RADIUS_LIMIT:
+                reject["island"] += 1
+                continue
+            if _clearance(pf, src) < MIN_ENDPOINT_CLEARANCE:
+                reject["clearance_end"] += 1
                 continue
             if abs(float(src[1] - tgt[1])) > HEIGHT_DIFF_LIMIT:
+                reject["height"] += 1
                 continue
 
             geo, wps = _shortest_path(pf, src, tgt)
             if np.isinf(geo) or not (MIN_GEO_DIST <= geo <= MAX_GEO_DIST):
+                reject["geo"] += 1
                 continue
             if len(wps) < MIN_WAYPOINTS:
+                reject["wps"] += 1
                 continue
 
             euclid = float(np.linalg.norm(src - tgt))
             if euclid < 1e-6 or geo / euclid < GEO_EUCLID_MIN_RATIO:
+                reject["straight"] += 1
                 continue
 
             ref = _subsample_waypoints(wps)
             if len(ref) < 3:
                 ref = list(wps)
 
+            # Check clearance for every waypoint on the reference path.
+            # Navmesh-shortest paths tend to hug obstacle corners, which is both
+            # where the agent gets physically wedged AND where GS render quality
+            # degrades. Reject paths whose tightest waypoint is too close to a
+            # boundary, or whose mean clearance is too low.
+            wp_clear = [_clearance(pf, w) for w in ref]
+            if min(wp_clear) < MIN_WAYPOINT_CLEARANCE:
+                reject["clearance_wp"] += 1
+                continue
+            if float(np.mean(wp_clear)) < MIN_AVG_PATH_CLEARANCE:
+                reject["clearance_avg"] += 1
+                continue
+
+            # Require the path to contain meaningful turning, otherwise the
+            # trajectory is "agent walks forward for 60m" with no turn signal.
+            total_turn, max_turn = _turn_angles(ref)
+            if total_turn < MIN_TOTAL_TURN_DEG:
+                reject["turn_total"] += 1
+                continue
+            if max_turn < MIN_MAX_TURN_DEG:
+                reject["turn_max"] += 1
+                continue
+
             h = _heading(ref[0], ref[1]) if len(ref) > 1 else float(np.random.uniform(0, 2 * np.pi))
+            rot = _heading_to_quat(h)
+
+            # Dry-run greedy follower on navmesh (no rendering). Rejects paths
+            # the trajectory generator couldn't actually navigate — stuck
+            # agents, oscillation, can't reach goal. This keeps every accepted
+            # episode guaranteed to produce an ok trajectory downstream.
+            mv_ratio, final_dist, n_frames = dry_run_trajectory(sim, src.tolist(), rot, ref)
+            if n_frames < DRY_MIN_FRAMES:
+                reject["dry_frames"] += 1
+                continue
+            if mv_ratio < DRY_MIN_MOVING_RATIO:
+                reject["dry_moving"] += 1
+                continue
+            if final_dist > DRY_MAX_FINAL_GOAL_DIST:
+                reject["dry_goal"] += 1
+                continue
 
             episodes.append({
                 "start": [float(v) for v in src],
-                "rot":   _heading_to_quat(h),
+                "rot":   rot,
                 "goal":  [float(v) for v in tgt],
                 "ref":   [[float(v) for v in p] for p in ref],
                 "geo":   float(geo),
+                "clear": [float(c) for c in wp_clear],
+                "total_turn": float(total_turn),
+                "max_turn": float(max_turn),
+                "dry_mv_ratio": float(mv_ratio),
+                "dry_final_dist": float(final_dist),
+                "dry_frames": int(n_frames),
             })
             break  # got a valid episode
 
+    # Log reject-reason distribution so the operator can tune thresholds per scene.
+    # Also emit when 0 episodes found — that's when debug info matters most.
+    total_rej = sum(reject.values())
+    print(f"    reject reasons: {reject}  (total attempts={attempts}, rejected={total_rej}, accepted={len(episodes)})")
     return episodes
 
 
@@ -483,7 +749,11 @@ def main():
     ap.add_argument("--gpu", type=int, default=0, help="GPU device for rendering")
     ap.add_argument("--resume", action="store_true",
                     help="Skip scenes that already have a checkpoint")
+    ap.add_argument("--scenes", type=str, default="",
+                    help="Comma-separated scene names to process (e.g. 'scene01,scene03'). "
+                         "Empty = all scenes.")
     args = ap.parse_args()
+    scene_filter = set(s.strip() for s in args.scenes.split(",") if s.strip()) if args.scenes else None
 
     # --- Lazy imports (keep --help fast) ---
     import habitat_sim
@@ -506,6 +776,10 @@ def main():
     global_t0 = time.time()
 
     for split_name, scenes in splits.items():
+        if scene_filter is not None:
+            scenes = [s for s in scenes if s["name"] in scene_filter]
+            if not scenes:
+                continue
         n_ep = args.train_episodes if split_name == "train" else args.val_episodes
         print(f"\n{'=' * 64}")
         print(f"  {split_name.upper()} — {len(scenes)} scenes x {n_ep} episodes")
@@ -538,6 +812,16 @@ def main():
             pf_cfg.enable_physics = False
             pf_agent = habitat_sim.agent.AgentConfiguration()
             pf_agent.sensor_specifications = []
+            # Configure actions so the dry-run greedy follower can call sim.step.
+            # Must match the follower's actuations in generate_vln_trajectories.py.
+            pf_agent.action_space = {
+                "move_forward": habitat_sim.agent.ActionSpec(
+                    "move_forward", habitat_sim.agent.ActuationSpec(amount=DRY_FORWARD_STEP)),
+                "turn_left": habitat_sim.agent.ActionSpec(
+                    "turn_left", habitat_sim.agent.ActuationSpec(amount=DRY_TURN_ANGLE)),
+                "turn_right": habitat_sim.agent.ActionSpec(
+                    "turn_right", habitat_sim.agent.ActuationSpec(amount=DRY_TURN_ANGLE)),
+            }
             pf_sim = habitat_sim.Simulator(habitat_sim.Configuration(pf_cfg, [pf_agent]))
             if not pf_sim.pathfinder.load_nav_mesh(sc["navmesh"]):
                 print(f"    SKIP – cannot load navmesh {sc['navmesh']}")
@@ -545,7 +829,7 @@ def main():
                 continue
             nav_area = pf_sim.pathfinder.navigable_area
 
-            paths = sample_paths(pf_sim.pathfinder, n_ep, args.seed + si * 10000)
+            paths = sample_paths(pf_sim, n_ep, args.seed + si * 10000)
             pf_sim.close()
 
             if not paths:
@@ -631,12 +915,18 @@ def main():
             print(f"    Done: {len(scene_episodes)} episodes ({time.time()-t0:.1f}s)")
 
         # ── Save split dataset ───────────────────────────────────────
-        if split_episodes:
+        # Skip when --scenes is filtered: multiple parallel workers would race
+        # on this file, each overwriting with only its own subset. In that
+        # mode, the caller should rebuild the .json.gz from per-scene
+        # checkpoints after all workers finish.
+        if split_episodes and scene_filter is None:
             vocab = build_vocab(all_texts)
             out_path = str(output_root / split_name / f"{split_name}.json.gz")
             save_dataset(split_episodes, vocab, out_path)
             print(f"\n  Saved {len(split_episodes)} episodes -> {out_path}")
             print(f"  Vocabulary size: {len(vocab)} words")
+        elif split_episodes:
+            print(f"\n  [scene-filter mode] {len(split_episodes)} episodes saved to checkpoints only; call rebuild externally")
 
     elapsed_total = time.time() - global_t0
     print(f"\nAll done! Total time: {elapsed_total/60:.1f} min")

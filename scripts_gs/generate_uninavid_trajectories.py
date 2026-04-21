@@ -42,10 +42,19 @@ OUTPUT_ROOT = SCENES_ROOT / "trajectory_data" / "uninavid"
 # Navigation parameters (match standard Uni-NaVid)
 FORWARD_STEP = 0.25     # metres
 TURN_ANGLE = 30.0       # degrees
-TURN_THRESHOLD = 15.0   # degrees – half of turn angle
+TURN_THRESHOLD = 29.0   # degrees – slightly below TURN_ANGLE
 WAYPOINT_RADIUS = 0.5   # metres – advance to next waypoint when closer
 LAST_WP_RADIUS = 0.25   # tighter radius for the final waypoint
 MAX_STEPS = 498          # max steps per episode
+
+# Progress-based stuck detection
+NO_PROGRESS_LIMIT = 10          # abandon waypoint after this many no-progress steps
+PROGRESS_EPS = 0.02             # m — improvement threshold
+
+# Post-trajectory quality filter.
+MIN_MOVING_FRAME_RATIO = 0.55   # fraction of frames that must show movement >PROGRESS_EPS
+MAX_FINAL_GOAL_DIST = 2.0       # final position must be within 2m of goal
+MIN_TRAJECTORY_FRAMES = 2       # reject ultra-short trajectories
 
 # Rendering (match standard Uni-NaVid evaluation)
 RENDER_W = 640
@@ -99,10 +108,16 @@ def heading_from_quat(q):
 
 
 def desired_heading(src, tgt):
-    """Heading angle from src to tgt (habitat: -Z forward, Y up)."""
+    """Heading the agent needs to face tgt from src.
+
+    Habitat: default forward is -Z, so a Y-rotation by h maps local -Z to
+    world (-sin h, 0, -cos h). For this to point toward tgt we need
+    sin h = -(tgt.x - src.x) and cos h = -(tgt.z - src.z), hence
+    atan2(-dx, -dz). See generate_vln_trajectories.py for history.
+    """
     dx = tgt[0] - src[0]
     dz = tgt[2] - src[2]
-    return math.atan2(dx, -dz)
+    return math.atan2(-dx, -dz)
 
 
 def angle_diff(a, b):
@@ -167,7 +182,10 @@ ACTION_NAME = {ACT_FORWARD: "move_forward", ACT_LEFT: "turn_left", ACT_RIGHT: "t
 def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
     """
     Follow the reference_path using a greedy heading-based controller.
-    Saves an .mp4 video and returns Uni-NaVid annotation dict, or None on failure.
+
+    Strategy mirrors generate_vln_trajectories.py: progress-based stuck
+    detection + post-trajectory quality filter + buffered writes so that
+    rejected trajectories never touch disk.
     """
     import quaternion as _quat  # noqa
 
@@ -184,12 +202,12 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
     scene_name = episode["scene_id"].split("/")[-2]
     ep_id = int(episode["episode_id"])
 
-    # Collect frames and actions
-    frames = []
-    actions = []
-    next_wp = 1  # start navigating towards waypoint 1
-    stuck_count = 0
-    prev_pos = None
+    # Collect frames, actions, and positions (aligned so positions[i] is the
+    # agent's location when frames[i] was captured; positions[0] is the start).
+    frames: List[np.ndarray] = []
+    actions: List = []
+    positions: List[np.ndarray] = []
+    next_wp = 1
 
     # Initial observation
     obs = sim.get_sensor_observations()
@@ -197,6 +215,11 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
     if rgb.ndim == 3 and rgb.shape[-1] == 4:
         rgb = rgb[:, :, :3]
     frames.append(rgb)
+    positions.append(state.position.copy())
+
+    # Progress tracking for current waypoint
+    best_wp_dist = xz_dist(state.position, ref_path[next_wp]) if next_wp < len(ref_path) else 0.0
+    no_progress = 0
 
     while next_wp < len(ref_path) and len(actions) < MAX_STEPS:
         state = agent.get_state()
@@ -209,9 +232,10 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
         # Check if we've reached the current waypoint
         if xz_dist(pos, ref_path[next_wp]) < radius:
             next_wp += 1
-            stuck_count = 0
             if next_wp >= len(ref_path):
                 break
+            best_wp_dist = xz_dist(pos, ref_path[next_wp])
+            no_progress = 0
             continue
 
         # Compute desired heading towards waypoint
@@ -227,20 +251,22 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
         # Execute action
         sim.step(ACTION_NAME[action])
 
-        # Stuck detection
+        # Progress-based stuck detection
         new_state = agent.get_state()
         new_pos = new_state.position
-        if prev_pos is not None and np.linalg.norm(new_pos - prev_pos) < 0.001 and action == ACT_FORWARD:
-            stuck_count += 1
-            if stuck_count > 30:
+        new_wp_dist = xz_dist(new_pos, ref_path[next_wp])
+        if new_wp_dist < best_wp_dist - PROGRESS_EPS:
+            best_wp_dist = new_wp_dist
+            no_progress = 0
+        else:
+            no_progress += 1
+            if no_progress > NO_PROGRESS_LIMIT:
                 next_wp += 1
-                stuck_count = 0
                 if next_wp >= len(ref_path):
                     break
+                best_wp_dist = xz_dist(new_pos, ref_path[next_wp])
+                no_progress = 0
                 continue
-        else:
-            stuck_count = 0
-        prev_pos = new_pos.copy()
 
         # Record action and frame
         actions.append(action)
@@ -249,12 +275,15 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
         if rgb.ndim == 3 and rgb.shape[-1] == 4:
             rgb = rgb[:, :, :3]
         frames.append(rgb)
+        positions.append(new_pos.copy())
 
-    # Append stop action
+    # Append stop action (not tied to any frame — Uni-NaVid format puts it
+    # as the final predicted word, and the video already ends on arrival).
     actions.append("stop")
 
-    # Validate trajectory (need at least a few actions)
-    if len(actions) < 4:
+    # Sanity check only — all quality filtering happens at episode generation
+    # (see generate_vln_episodes.py dry_run_trajectory).
+    if len(frames) < MIN_TRAJECTORY_FRAMES:
         return None
 
     # Convert action codes to words (except the final "stop" which is already a string)
@@ -265,7 +294,7 @@ def follow_path(sim, episode: dict, output_dir: str) -> Optional[dict]:
         else:
             action_words.append(ACTION_WORDS[a])
 
-    # Save video as .mp4
+    # Save video as .mp4 (only after passing filter)
     ep_name = f"{scene_name}_gs_{ep_id:06d}"
     video_dir = os.path.join(output_dir, "nav_videos")
     os.makedirs(video_dir, exist_ok=True)
