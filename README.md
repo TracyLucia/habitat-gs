@@ -135,8 +135,8 @@ Please refer to our 🤗 [huggingface dataset](https://huggingface.co/datasets/R
 | 1 | **GS Scenes** | ~12.5 GB | Everything — core scene assets |
 | 2 | **Gaussian Avatars** | ~3.1 GB | Dynamic avatar simulation |
 | 3 | **Habitat-Lab Nav Data** | ~15 MB | PointNav / ImageNav / ObjectNav training & evaluation |
-| 4 | **StreamVLN Data** | ~65 GB | VLN training & evaluation ([StreamVLN](https://github.com/InternRobotics/StreamVLN)) |
-| 5 | **Uni-NaVid Data** | ~27 GB | VLN training & evaluation ([Uni-NaVid](https://github.com/jzhzhang/Uni-NaVid)) |
+| 4 | **StreamVLN Data** | ~27 GB | VLN training & evaluation ([StreamVLN](https://github.com/InternRobotics/StreamVLN)) |
+| 5 | **Uni-NaVid Data** | ~16 GB | VLN training & evaluation ([Uni-NaVid](https://github.com/jzhzhang/Uni-NaVid)) |
 
 ## 🚀 Run Habitat-GS
 
