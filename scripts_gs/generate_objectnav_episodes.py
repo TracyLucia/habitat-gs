@@ -45,7 +45,7 @@ NUM_TRAIN_EPISODES = 1000
 NUM_VAL_EPISODES = 100
 
 # ---------------------------------------------------------------------------
-# Object detection constants
+# Object detection constants (outdoor defaults; overridden by --indoor below)
 # ---------------------------------------------------------------------------
 NUM_SAMPLE_POINTS = 200        # navigable points per scene for scanning
 NUM_ROTATIONS = 4              # views per point (0, 90, 180, 270 degrees)
@@ -68,10 +68,20 @@ UBIQUITY_SAMPLE_POINTS = 50   # points to test for ubiquity filter
 UBIQUITY_THRESHOLD = 0.70     # if >70% points are <5m from nearest instance, skip
 UBIQUITY_DIST = 5.0           # distance threshold for ubiquity
 
+# Indoor-specific overrides (applied when --indoor is passed)
+INDOOR_FURTHEST_DIST = 15.0           # indoor scenes are smaller
+INDOOR_DBSCAN_EPS = 1.5               # tolerate ~1.5m back-projection drift per object
+INDOOR_INSTANCE_MERGE_DIST = 1.5      # keep >= EPS so post-cluster merge can clean up
+INDOOR_UBIQUITY_DIST = 2.5
+INDOOR_MAX_INSTANCES_PER_CATEGORY = 8
+INDOOR_MIN_INSTANCES_PER_CATEGORY = 1 # one bed/fridge/sofa is a legit goal
+INDOOR_CLIP_MIN_SCORE = 0.25          # stricter than outdoor 0.15
+
 # ---------------------------------------------------------------------------
 # CLIP categories
 # ---------------------------------------------------------------------------
-CATEGORY_PROMPTS = {
+# Outdoor (default). Episode generation IDs 0-11.
+OUTDOOR_CATEGORY_PROMPTS = {
     "car":          "a car",
     "bench":        "a bench",
     "tree":         "a tree",
@@ -85,10 +95,57 @@ CATEGORY_PROMPTS = {
     "statue":       "a statue",
     "chair":        "a chair",
 }
-BACKGROUND_PROMPTS = [
+OUTDOOR_BACKGROUND_PROMPTS = [
     "a building facade", "a wall", "a road", "a sidewalk",
     "the sky", "grass", "the ground",
 ]
+
+# Indoor (--indoor mode). 12 classes covering common indoor objects.
+# Two of them ("chair", "potted plant") deliberately share names — and IDs —
+# with their outdoor counterparts in the unified taxonomy below; a chair is a
+# chair regardless of where it sits, and the model should learn one head for it.
+INDOOR_CATEGORY_PROMPTS = {
+    "chair":        "a chair",
+    "potted plant": "a potted plant",
+    "sofa":         "a sofa",
+    "bed":          "a bed",
+    "dining table": "a dining table",
+    "toilet":       "a toilet",
+    "sink":         "a sink",
+    "tv":           "a television",
+    "refrigerator": "a refrigerator",
+    "bookshelf":    "a bookshelf",
+    "cabinet":      "a cabinet",
+    "lamp":         "a lamp",
+}
+INDOOR_BACKGROUND_PROMPTS = [
+    "a wall", "a floor", "a ceiling", "a window", "a door",
+    "a curtain", "an empty room",
+]
+
+# Active prompts (rebound at runtime by main() if --indoor is passed)
+CATEGORY_PROMPTS = OUTDOOR_CATEGORY_PROMPTS
+BACKGROUND_PROMPTS = OUTDOOR_BACKGROUND_PROMPTS
+
+
+def _build_unified_taxonomy():
+    """Outdoor first (IDs 0-11), then indoor names that aren't already present.
+    Names that overlap (chair, potted plant) reuse the outdoor ID — one chair
+    head, not two. Result is the union of both sets, no name duplicated."""
+    table = {name: i for i, name in enumerate(OUTDOOR_CATEGORY_PROMPTS)}
+    next_id = len(table)
+    for name in INDOOR_CATEGORY_PROMPTS:
+        if name not in table:
+            table[name] = next_id
+            next_id += 1
+    return table
+
+
+# Unified taxonomy: outdoor 0-11, indoor unique extensions 12+ (currently 12-21
+# = sofa/bed/dining table/toilet/sink/tv/refrigerator/bookshelf/cabinet/lamp).
+# Always written to ObjectNav metadata so outdoor and indoor episode files
+# share the same category_to_task_category_id and can be loaded together.
+UNIFIED_CATEGORY_TO_ID = _build_unified_taxonomy()
 
 SAM_CHECKPOINT = Path.home() / ".cache" / "sam_checkpoints" / "sam_vit_b_01ec64.pth"
 CLIP_CHECKPOINT = Path.home() / ".cache" / "clip_models" / "vit_b_32_laion400m.pt"
@@ -407,33 +464,47 @@ def scan_scene_for_objects(sim, pathfinder, mask_gen, clip_model,
 # =====================================================================
 
 def save_visualization(rgb, annotations, out_dir, idx):
-    """Save annotated image with mask outlines and labels."""
+    """Save annotated image with mask outlines + readable text labels."""
+    from PIL import ImageDraw, ImageFont
+    from scipy import ndimage
+
     os.makedirs(out_dir, exist_ok=True)
     img = rgb.copy()
 
-    # Simple overlay: darken non-mask areas, colour mask borders
     colors = [
         (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
         (255, 0, 255), (0, 255, 255), (128, 255, 0), (255, 128, 0),
     ]
+
+    # First pass: draw mask borders directly into the numpy array
     for i, ann in enumerate(annotations):
         color = colors[i % len(colors)]
-        mask = ann["mask"]
-
-        # Draw mask border
-        from scipy import ndimage
-        eroded = ndimage.binary_erosion(mask, iterations=2)
-        border = mask & ~eroded
+        eroded = ndimage.binary_erosion(ann["mask"], iterations=2)
+        border = ann["mask"] & ~eroded
         img[border] = color
 
-        # Add label text via simple pixel drawing (avoid matplotlib dependency)
+    # Second pass: render text labels via PIL so they are actually readable
+    pil_img = Image.fromarray(img)
+    draw = ImageDraw.Draw(pil_img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 11)
+    except (OSError, IOError):
+        font = ImageFont.load_default()
+
+    for i, ann in enumerate(annotations):
+        color = colors[i % len(colors)]
         x1, y1, x2, y2 = ann["bbox"]
         label = f"{ann['category']} {ann['score']:.2f}"
-        # Put a colored bar at top of bbox
-        bar_h = min(15, y2 - y1)
-        img[y1:y1+bar_h, x1:min(x1+len(label)*7, x2)] = color
+        # text background bar for legibility
+        try:
+            tw, th = font.getbbox(label)[2:4]
+        except AttributeError:
+            tw, th = draw.textsize(label, font=font)
+        ty = max(0, y1 - th - 1)
+        draw.rectangle([x1, ty, min(x1 + tw + 4, x2), ty + th + 2], fill=color)
+        draw.text((x1 + 2, ty + 1), label, fill=(0, 0, 0), font=font)
 
-    Image.fromarray(img).save(os.path.join(out_dir, f"view_{idx:04d}.png"))
+    pil_img.save(os.path.join(out_dir, f"view_{idx:04d}.png"))
 
 
 # =====================================================================
@@ -726,29 +797,33 @@ def generate_objectnav_episodes(pathfinder, scene_id, goals_by_category,
 # Save functions
 # =====================================================================
 
+def _atomic_write_gz_json(data, path):
+    """Write gzipped JSON via tmp+rename so concurrent workers can't corrupt
+    each other's output (e.g. when two workers update the same master index)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with gzip.open(tmp, "wt") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
 def save_objectnav_dataset(episodes, goals_by_category, category_to_id, path):
     """Save per-scene ObjectNav dataset."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    data = {
+    _atomic_write_gz_json({
         "category_to_task_category_id": category_to_id,
         "category_to_scene_annotation_category_id": category_to_id,
         "goals_by_category": goals_by_category,
         "episodes": episodes,
-    }
-    with gzip.open(path, "wt") as f:
-        json.dump(data, f)
+    }, path)
 
 
 def save_master_index(category_to_id, path):
     """Save master index with category mappings and empty episodes."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    data = {
+    _atomic_write_gz_json({
         "category_to_task_category_id": category_to_id,
         "category_to_scene_annotation_category_id": category_to_id,
         "episodes": [],
-    }
-    with gzip.open(path, "wt") as f:
-        json.dump(data, f)
+    }, path)
 
 
 # =====================================================================
@@ -766,11 +841,43 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scene", type=str, default=None,
                         help="Process a single scene only")
+    parser.add_argument("--scenes", type=str, default=None,
+                        help="Comma-separated list of scene names to generate")
     parser.add_argument("--num-sample-points", type=int, default=NUM_SAMPLE_POINTS)
     parser.add_argument("--visualize", action="store_true",
                         help="Save annotated detection images")
+    parser.add_argument("--indoor", action="store_true",
+                        help="Use indoor categories (sofa/bed/.../oven, IDs 12-23) "
+                             "and indoor-tuned geometry. Output metadata uses the "
+                             "24-class unified taxonomy.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    scene_filter = None
+    if args.scenes:
+        scene_filter = set(s.strip() for s in args.scenes.split(",") if s.strip())
+
+    # Switch active prompts + indoor-tuned geometry. Done before any model
+    # loading so load_clip() picks up the right CATEGORY_PROMPTS.
+    global CATEGORY_PROMPTS, BACKGROUND_PROMPTS
+    global FURTHEST_DIST, DBSCAN_EPS, INSTANCE_MERGE_DIST
+    global UBIQUITY_DIST, MAX_INSTANCES_PER_CATEGORY
+    global MIN_INSTANCES_PER_CATEGORY, CLIP_MIN_SCORE
+    if args.indoor:
+        CATEGORY_PROMPTS = INDOOR_CATEGORY_PROMPTS
+        BACKGROUND_PROMPTS = INDOOR_BACKGROUND_PROMPTS
+        FURTHEST_DIST = INDOOR_FURTHEST_DIST
+        DBSCAN_EPS = INDOOR_DBSCAN_EPS
+        INSTANCE_MERGE_DIST = INDOOR_INSTANCE_MERGE_DIST
+        UBIQUITY_DIST = INDOOR_UBIQUITY_DIST
+        MAX_INSTANCES_PER_CATEGORY = INDOOR_MAX_INSTANCES_PER_CATEGORY
+        MIN_INSTANCES_PER_CATEGORY = INDOOR_MIN_INSTANCES_PER_CATEGORY
+        CLIP_MIN_SCORE = INDOOR_CLIP_MIN_SCORE
+        print(f"[indoor mode] categories={list(CATEGORY_PROMPTS.keys())}")
+        print(f"[indoor mode] FURTHEST_DIST={FURTHEST_DIST}m DBSCAN_EPS={DBSCAN_EPS}m "
+              f"INSTANCE_MERGE_DIST={INSTANCE_MERGE_DIST}m UBIQUITY_DIST={UBIQUITY_DIST}m "
+              f"MAX_INSTANCES_PER_CATEGORY={MAX_INSTANCES_PER_CATEGORY} "
+              f"MIN_INSTANCES_PER_CATEGORY={MIN_INSTANCES_PER_CATEGORY} "
+              f"CLIP_MIN_SCORE={CLIP_MIN_SCORE}")
 
     scenes_root = Path(args.scenes_root)
     output_root = (Path(args.output_root) if args.output_root
@@ -792,8 +899,10 @@ def main():
     clip_model, clip_preprocess, text_features, cat_names, n_cat = load_clip(args.device)
     print("Models loaded!\n")
 
-    # Build global category mapping
-    category_to_id = {name: i for i, name in enumerate(CATEGORY_PROMPTS.keys())}
+    # Build global category mapping. Always emit the 24-class unified taxonomy
+    # so outdoor and indoor episode files can be merged into one dataloader
+    # (outdoor episodes use IDs 0-11, indoor episodes use IDs 12-23).
+    category_to_id = dict(UNIFIED_CATEGORY_TO_ID)
 
     splits = discover_scenes(scenes_root)
     if not splits:
@@ -809,6 +918,8 @@ def main():
 
         for idx, info in enumerate(scenes):
             if args.scene and info["name"] != args.scene:
+                continue
+            if scene_filter is not None and info["name"] not in scene_filter:
                 continue
 
             name = info["name"]
@@ -865,8 +976,48 @@ def main():
             )
             print(f"    after filters: {', '.join(f'{c}={len(o)}' for c, o in objects_per_category.items())}")
 
+            # Salvage path: if strict thresholds wiped everything out, re-cluster
+            # the raw detections with a much looser DBSCAN (EPS=3m, MIN_SAMPLES=1)
+            # so even isolated detections can become a 1-instance goal. Better a
+            # scene with one chair-target than a scene with 0 episodes.
+            if not objects_per_category and detections:
+                print("    SALVAGE: 0 cats at strict thresholds; relaxed re-cluster")
+                from sklearn.cluster import DBSCAN
+                by_cat = {}
+                for d in detections:
+                    by_cat.setdefault(d["category"], []).append(d)
+                salvaged = {}
+                for cat, dets in by_cat.items():
+                    cents = np.array([d["centroid"] for d in dets])
+                    labels = DBSCAN(eps=3.0, min_samples=1).fit(cents).labels_
+                    objs = []
+                    for lbl in sorted(set(labels)):
+                        if lbl == -1:
+                            continue
+                        m = labels == lbl
+                        cluster_dets = [d for d, b in zip(dets, m) if b]
+                        cluster_cents = np.array([d["centroid"] for d in cluster_dets])
+                        vp_map = {}
+                        for d in cluster_dets:
+                            key = tuple(np.round(d["agent_position"], 2))
+                            if key not in vp_map or d["score"] > vp_map[key]["score"]:
+                                vp_map[key] = d
+                        view_points = [{"position": v["agent_position"],
+                                        "rotation": v["agent_rotation"],
+                                        "iou": v["iou"]} for v in vp_map.values()]
+                        if not view_points:
+                            continue
+                        objs.append({"position": np.median(cluster_cents, axis=0).tolist(),
+                                     "view_points": view_points,
+                                     "num_detections": len(cluster_dets),
+                                     "mean_score": float(np.mean([d["score"] for d in cluster_dets]))})
+                    if objs:
+                        salvaged[cat] = cap_instances(objs)
+                objects_per_category = salvaged
+                print(f"    salvage result: {', '.join(f'{c}={len(o)}' for c, o in objects_per_category.items()) or '(still empty)'}")
+
             if not objects_per_category:
-                print("    NO valid objects after filtering, skipping")
+                print("    NO valid objects even after salvage, skipping")
                 sim.close()
                 continue
 

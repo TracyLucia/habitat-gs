@@ -1,0 +1,31 @@
+--- a/uninavid/model/uninavid_arch.py
++++ b/uninavid/model/uninavid_arch.py
+@@ -402,7 +402,14 @@
+         if vision_tower is None or images is None or input_ids.shape[1] == 1:
+             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[
+                 1] == 1:
+-                attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1),
++                # Newer transformers wraps KV cache in DynamicCache or
++                # nested lists; past_key_values[-1][-1] may not be a tensor.
++                # Walk the nested structure until a tensor is found.
++                _last = past_key_values[-1]
++                while isinstance(_last, (list, tuple)) and len(_last) > 0 and not hasattr(_last, "shape"):
++                    _last = _last[-1] if hasattr(_last[-1], "shape") else _last[0]
++                _seq_len = _last.shape[-2] if hasattr(_last, "shape") else attention_mask.shape[1]
++                attention_mask = torch.ones((attention_mask.shape[0], _seq_len + 1),
+                                             dtype=attention_mask.dtype, device=attention_mask.device)
+             return input_ids, attention_mask, past_key_values, None, labels
+ 
+--- a/uninavid/model/builder.py
++++ b/uninavid/model/builder.py
+@@ -29,7 +29,9 @@
+     if load_8bit:
+         kwargs['load_in_8bit'] = True
+     elif load_4bit:
+-        kwargs['load_in_4bit'] = True
++        # NOTE: do not also set kwargs['load_in_4bit']=True; newer transformers
++        # rejects passing both load_in_4bit and quantization_config kwargs to
++        # from_pretrained (raises ValueError).
+         kwargs['quantization_config'] = BitsAndBytesConfig(
+             load_in_4bit=True,
+             bnb_4bit_compute_dtype=torch.float16,

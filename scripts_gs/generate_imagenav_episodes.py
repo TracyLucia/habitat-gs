@@ -255,7 +255,12 @@ def main():
     parser.add_argument("--val-episodes", type=int, default=NUM_VAL_EPISODES)
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--scene", type=str, default=None, help="Generate for a single scene only")
+    parser.add_argument("--scenes", type=str, default=None,
+        help="Comma-separated list of scene names to generate")
     args = parser.parse_args()
+    scene_filter = None
+    if args.scenes:
+        scene_filter = set(s.strip() for s in args.scenes.split(",") if s.strip())
 
     scenes_root = Path(args.scenes_root)
     output_root = Path(args.output_root) if args.output_root else scenes_root / "episodes" / "imagenav"
@@ -276,6 +281,8 @@ def main():
 
         for idx, info in enumerate(scenes):
             if args.scene and info["name"] != args.scene:
+                continue
+            if scene_filter is not None and info["name"] not in scene_filter:
                 continue
 
             name = info["name"]

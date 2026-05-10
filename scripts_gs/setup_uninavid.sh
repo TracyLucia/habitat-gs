@@ -5,7 +5,8 @@
 # What this script does:
 #   1. Creates conda env habitat-gs-uni-navid (cloned from habitat-gs)
 #   2. Installs Uni-NaVid Python dependencies
-#   3. Downloads required model checkpoints (EVA-ViT-G, Vicuna-7B, Uni-NaVid)
+#   3. Applies uninavid_compat.patch to the Uni-NaVid clone
+#   4. Downloads required model checkpoints (EVA-ViT-G, Vicuna-7B, Uni-NaVid)
 #
 # Prerequisites:
 #   - habitat-gs conda env already set up
@@ -15,12 +16,14 @@
 #   bash scripts_gs/setup_uninavid.sh
 #   bash scripts_gs/setup_uninavid.sh --skip-download
 #   bash scripts_gs/setup_uninavid.sh --skip-env
+#   bash scripts_gs/setup_uninavid.sh --skip-patch
 #
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────
 SKIP_ENV=false
 SKIP_DEPS=false
+SKIP_PATCH=false
 SKIP_DOWNLOAD=false
 PROXY=""
 
@@ -29,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-env)       SKIP_ENV=true;      shift;;
         --skip-deps)      SKIP_DEPS=true;     shift;;
+        --skip-patch)     SKIP_PATCH=true;    shift;;
         --skip-download)  SKIP_DOWNLOAD=true; shift;;
         --proxy)          PROXY="$2";         shift 2;;
         *)                shift;;
@@ -114,10 +118,47 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-#  Step 3: Download model checkpoints
+#  Step 3: Apply uninavid_compat.patch
+# ══════════════════════════════════════════════════════════════════════
+# Two upstream-Uni-NaVid bugs surface on the transformers version pinned by
+# this env (>=4.38). The patch:
+#   1) uninavid/model/uninavid_arch.py L405 — KV cache compat for newer
+#      transformers (DynamicCache / nested lists). Without this, eval crashes
+#      at the first generate() call that has a non-empty cache.
+#   2) uninavid/model/builder.py — drops the redundant `load_in_4bit=True`
+#      kwarg that conflicts with `quantization_config` in newer transformers.
+#      Latent (only triggers when load_4bit=True is requested).
+#
+# Idempotent: re-running re-applies cleanly, or no-ops if already patched.
+PATCH_FILE="$SCRIPT_DIR/uninavid_compat.patch"
+if [[ "$SKIP_PATCH" == "false" ]]; then
+    echo "── Step 3: Applying uninavid_compat.patch ──"
+    if [[ ! -f "$PATCH_FILE" ]]; then
+        echo "  WARNING: $PATCH_FILE not found, skipping."
+    else
+        # Use --reverse --dry-run to detect already-applied patch
+        if (cd "$UNINAVID_ROOT" && patch -p1 --reverse --dry-run < "$PATCH_FILE" >/dev/null 2>&1); then
+            echo "  Patch already applied, skipping."
+        elif (cd "$UNINAVID_ROOT" && patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1); then
+            (cd "$UNINAVID_ROOT" && patch -p1 < "$PATCH_FILE")
+            echo "  Patch applied."
+        else
+            echo "  ERROR: patch does not apply cleanly. Check $PATCH_FILE against"
+            echo "  the current state of $UNINAVID_ROOT/uninavid/model/."
+            exit 1
+        fi
+    fi
+    echo ""
+else
+    echo "── Step 3: Skipped (--skip-patch) ──"
+    echo ""
+fi
+
+# ══════════════════════════════════════════════════════════════════════
+#  Step 4: Download model checkpoints
 # ══════════════════════════════════════════════════════════════════════
 if [[ "$SKIP_DOWNLOAD" == "false" ]]; then
-    echo "── Step 3: Downloading model checkpoints ──"
+    echo "── Step 4: Downloading model checkpoints ──"
 
     MODEL_ZOO="$UNINAVID_ROOT/model_zoo"
     mkdir -p "$MODEL_ZOO"
@@ -173,7 +214,7 @@ print('  Uni-NaVid pretrained: done')
 
     echo ""
 else
-    echo "── Step 3: Skipped (--skip-download) ──"
+    echo "── Step 4: Skipped (--skip-download) ──"
     echo ""
 fi
 

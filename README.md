@@ -42,9 +42,11 @@
 
 ## 📢 News
 
-> **[2026-04]** 🎉 Paper, project page, code and dataset of Habitat-GS are released! Check it out!
+> **[2026-05]** 🎉 [GS dataset](https://huggingface.co/datasets/RukawaY/gs_scenes) is expanded with 64 [InteriorGS](https://huggingface.co/datasets/spatialverse/InteriorGS) scenes! Now 129 scenes in total!
 
 > **[2026-04]** 🎉 [GS dataset](https://huggingface.co/datasets/RukawaY/gs_scenes) is updated! We provide 65 high-quality GS scenes, as well as episodes and trajectories for training and evaluation!
+
+> **[2026-04]** 🎉 Paper, project page, code and dataset of Habitat-GS are released! Check it out!
 
 ## 🧭 What Is Habitat-GS and What Can Habitat-GS Do?
 
@@ -132,11 +134,11 @@ Please refer to our 🤗 [huggingface dataset](https://huggingface.co/datasets/R
 
 |   | Category | Size | Required For |
 |---|----------|------|-------------|
-| 1 | **GS Scenes** | ~12.5 GB | Everything — core scene assets |
+| 1 | **GS Scenes** | ~27 GB | Everything — core scene assets |
 | 2 | **Gaussian Avatars** | ~3.1 GB | Dynamic avatar simulation |
-| 3 | **Habitat-Lab Nav Data** | ~15 MB | PointNav / ImageNav / ObjectNav training & evaluation |
-| 4 | **StreamVLN Data** | ~27 GB | VLN training & evaluation ([StreamVLN](https://github.com/InternRobotics/StreamVLN)) |
-| 5 | **Uni-NaVid Data** | ~16 GB | VLN training & evaluation ([Uni-NaVid](https://github.com/jzhzhang/Uni-NaVid)) |
+| 3 | **Habitat-Lab Nav Data** | ~30 MB | PointNav / ImageNav / ObjectNav training & evaluation |
+| 4 | **StreamVLN Data** | ~40 GB | VLN training & evaluation ([StreamVLN](https://github.com/InternRobotics/StreamVLN)) |
+| 5 | **Uni-NaVid Data** | ~25 GB | VLN training & evaluation ([Uni-NaVid](https://github.com/jzhzhang/Uni-NaVid)) |
 
 ## 🚀 Run Habitat-GS
 
@@ -430,20 +432,20 @@ We provide **one-click** training and evaluation pipelines for three navigation 
 data/scene_datasets/gs_scenes/
 ├── train.scene_dataset_config.json
 ├── val.scene_dataset_config.json
-├── train/                           # 55 training scenes
-│   ├── scene01/
-│   │   ├── scene01.gs.ply          # foreground GS render asset
-│   │   ├── background.gs.ply       # background GS asset (sky / distant geometry; optional)
-│   │   ├── scene01.mesh.ply        # collision mesh (will not be used unless physics is enabled)
-│   │   └── scene01.navmesh         # navigation mesh
-│   ├── scene02/
-│   │   └── ...
-│   └── scene55/
-├── val/                             # 10 evaluation scenes
-│   ├── scene56/
-│   ├── scene57/
-│   │   └── ...
-│   └── scene65/
+├── train/                           # 110 training scenes
+│   ├── scene01/                     #   self-reconstructed (55 scenes): full assets
+│   │   ├── scene01.gs.ply           #     foreground GS render asset
+│   │   ├── background.gs.ply        #     background GS asset (sky / distant geometry; optional)
+│   │   ├── scene01.mesh.ply         #     collision mesh (will not be used unless physics is enabled)
+│   │   └── scene01.navmesh          #     navigation mesh
+│   ├── scene02/ ... scene55/
+│   ├── interior_0007_840137/        #   InteriorGS (55 scenes): 3DGS and navmesh only
+│   │   ├── interior_0007_840137.gs.ply
+│   │   └── interior_0007_840137.navmesh
+│   └── interior_0022_840117/ ... ×55
+├── val/                             # 19 evaluation scenes
+│   ├── scene56/ ... scene65/
+│   └── interior_0516_840045/ ... ×9
 ├── configs/                         # Hydra YAML configs (provided)
 │   ├── ddppo_pointnav_gs_train.yaml
 │   ├── ddppo_pointnav_gs_eval.yaml
@@ -472,8 +474,11 @@ python scripts_gs/generate_pointnav_episodes.py
 # ImageNav episodes
 python scripts_gs/generate_imagenav_episodes.py
 
-# ObjectNav episodes (uses SAM + CLIP, see details below)
+# ObjectNav episodes - outdoor categories on outdoor scenes (uses SAM + CLIP)
 python scripts_gs/generate_objectnav_episodes.py
+
+# ObjectNav episodes - indoor categories on interiorGS scenes (--indoor switch)
+python scripts_gs/generate_objectnav_episodes.py --indoor
 ```
 
 <details>
@@ -488,7 +493,12 @@ ObjectNav uses **SAM (Segment Anything)** + **CLIP (zero-shot classification)** 
 | SAM ViT-B | `~/.cache/sam_checkpoints/sam_vit_b_01ec64.pth` | [GitHub](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
 | CLIP ViT-B-32 | `~/.cache/clip_models/vit_b_32_laion400m.pt` | [GitHub](https://github.com/mlfoundations/open_clip/releases) |
 
-**Object categories** (outdoor-focused): car, bench, tree, street lamp, traffic sign, fire hydrant, trash can, bicycle, potted plant, barrier, statue, chair.
+**Object categories:**
+
+| Range | Mode | Categories |
+|---|---|---|
+| ID 0–11 | outdoor (default) | car, bench, tree, street lamp, traffic sign, fire hydrant, trash can, bicycle, **potted plant**, barrier, statue, **chair** |
+| ID 12–21 | indoor (`--indoor`) | sofa, bed, dining table, toilet, sink, tv, refrigerator, bookshelf, cabinet, lamp |
 
 </details>
 
@@ -626,8 +636,8 @@ data/scene_datasets/gs_scenes/
 │   └── vln_gs_eval.yaml             # habitat config for VLN evaluation (provided)
 ├── episodes/
 │   └── vln/                         # generated by generate_vln_episodes.py
-│       ├── train/train.json.gz      # 55 scenes × 200 episodes = 11,000 train
-│       └── val/val.json.gz          # 10 scenes × 50 episodes = 500 val
+│       ├── train/train.json.gz      # 110 scenes × 200 episodes = 22,000 train
+│       └── val/val.json.gz          # 19 scenes × 50 episodes = 950 val
 └── trajectory_data/
     └── vln/                         # generated by generate_vln_trajectories.py
         ├── annotations.json         # StreamVLN-format action sequences
@@ -797,14 +807,15 @@ data/scene_datasets/gs_scenes/
 │   └── vln_uninavid_gs_eval.yaml    # habitat config for Uni-NaVid eval (provided)
 ├── episodes/
 │   └── vln/                         # shared with StreamVLN
-│       ├── train/train.json.gz      # 55 scenes × 200 episodes = 11,000 train
-│       └── val/val.json.gz          # 10 scenes × 50 episodes = 500 val
+│       ├── train/train.json.gz      # 110 scenes × 200 episodes = 22,000 train
+│       └── val/val.json.gz          # 19 scenes × 50 episodes = 950 val
 └── trajectory_data/
     └── uninavid/                    # generated by generate_uninavid_trajectories.py
         ├── nav_gs_train.json        # Uni-NaVid conversation-format annotations
         ├── nav_gs_val.json
         └── nav_videos/              # .mp4 trajectory videos
             ├── scene01_gs_000000.mp4
+            ├── interior_0007_840137_gs_000000.mp4
             └── ...
 ```
 
@@ -812,7 +823,7 @@ data/scene_datasets/gs_scenes/
 
 #### Step 1: One-Time Setup
 
-`setup_uninavid.sh` creates the `habitat-gs-uni-navid` conda environment cloned from `habitat-gs`, installs Uni-NaVid's Python dependencies, and downloads model checkpoints (EVA-ViT-G ~3.5GB, Vicuna-7B ~13GB, Uni-NaVid pretrained ~14GB).
+`setup_uninavid.sh` creates the `habitat-gs-uni-navid` conda environment cloned from `habitat-gs`, installs Uni-NaVid's Python dependencies, applies `scripts_gs/uninavid_compat.patch` to guarantee compatibility, and downloads model checkpoints (EVA-ViT-G ~3.5GB, Vicuna-7B ~13GB, Uni-NaVid pretrained ~14GB).
 
 ```bash
 bash scripts_gs/setup_uninavid.sh
@@ -824,6 +835,7 @@ bash scripts_gs/setup_uninavid.sh
 ```
 --skip-env          Skip creating the conda environment
 --skip-deps         Skip installing Python dependencies
+--skip-patch        Skip applying uninavid_compat.patch
 --skip-download     Skip downloading model checkpoints
 --proxy URL         HTTP proxy for downloads
 ```

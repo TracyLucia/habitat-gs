@@ -234,7 +234,15 @@ def main():
         help="Generate episodes for a single scene only (matches the scene "
              "directory name, e.g. 'scene28')",
     )
+    parser.add_argument(
+        "--scenes", type=str, default=None,
+        help="Comma-separated list of scene names to generate (filters --scene-style; "
+             "shares one habitat_sim process across all scenes)",
+    )
     args = parser.parse_args()
+    scene_filter = None
+    if args.scenes:
+        scene_filter = set(s.strip() for s in args.scenes.split(",") if s.strip())
 
     scenes_root = Path(args.scenes_root)
     output_root = (Path(args.output_root) if args.output_root
@@ -259,6 +267,8 @@ def main():
         for idx, scene_info in enumerate(scenes):
             scene_name = scene_info["name"]
             if args.scene and scene_name != args.scene:
+                continue
+            if scene_filter is not None and scene_name not in scene_filter:
                 continue
             navmesh_path = scene_info["navmesh"]
             scene_id = scene_info["scene_id"]
