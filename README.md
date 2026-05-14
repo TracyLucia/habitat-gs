@@ -98,13 +98,13 @@ cd habitat-gs
 git submodule update --init --recursive
 
 # Recommended: CUDA on, Bullet off
-HABITAT_WITH_CUDA=ON HABITAT_WITH_BULLET=OFF pip install -e .
+HABITAT_WITH_CUDA=ON HABITAT_WITH_BULLET=OFF pip install .
 ```
 
 If you also need Bullet physics (e.g. manipulate mesh objects in a 3DGS scene), install with:
 
 ```bash
-HABITAT_WITH_CUDA=ON HABITAT_WITH_BULLET=ON pip install -e .
+HABITAT_WITH_CUDA=ON HABITAT_WITH_BULLET=ON pip install .
 ```
 
 ### 🤖 Install Habitat-Lab (optional but recommended)
