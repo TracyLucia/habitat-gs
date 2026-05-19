@@ -158,7 +158,7 @@ For a static GS scene without avatars, you only need:
 
 **NOTE**: In our [provided dataset](https://huggingface.co/datasets/RukawaY/gs_scenes), an outdoor scene may also have:
 
-- a background 3DGS asset (`background.gs.ply`) for far-field content like sky or distant geometry that was separated from the foreground during reconstruction. To render foreground and background together as a single stage, merge the two `.gs.ply` files into one with `tools_gs/merge_background_gs.py`.
+- a background 3DGS asset (`background.ply`) for far-field content like sky or distant geometry that was separated from the foreground during reconstruction. To render foreground and background together as a single stage, merge the two `.ply` files into one with `tools_gs/merge_background_gs.py`.
 
 If you already have a high-quality NavMesh, you can use it directly. If not, we recommended the following pipeline to generate one from your GS scene:
 
@@ -435,7 +435,7 @@ data/scene_datasets/gs_scenes/
 ├── train/                           # 110 training scenes
 │   ├── scene01/                     #   self-reconstructed (55 scenes): full assets
 │   │   ├── scene01.gs.ply           #     foreground GS render asset
-│   │   ├── background.gs.ply        #     background GS asset (sky / distant geometry; optional)
+│   │   ├── background.ply           #     background GS asset (sky / distant geometry; optional)
 │   │   ├── scene01.mesh.ply         #     collision mesh (will not be used unless physics is enabled)
 │   │   └── scene01.navmesh          #     navigation mesh
 │   ├── scene02/ ... scene55/
