@@ -213,7 +213,11 @@ python tools_gs/export_animatable_to_canonical.py \
 
 2. Generate the motion driver on a scene NavMesh
 
-`driver.pkl` depends on the target scene because it is generated on the scene NavMesh. Run the following command in the `GAMMA` environment after installing GAMMA and make sure `habitat_sim` is importable in that environment. We provide two modes for generating the driver trajectory:
+`driver.pkl` depends on the target scene because it is generated on the scene NavMesh. Run the following command in the `GAMMA` environment after installing GAMMA and make sure `habitat_sim` is importable in that environment.
+
+> **GAMMA env**: For setting up the conda environment, please refer to [`environment.yml`](https://github.com/user-attachments/files/28255628/environment.yml) (`conda env create -f environment.yml`) and follow the instruction inside it to apply a necessary patch.
+
+We provide two modes for generating the driver trajectory:
 
 Auto-sample a path by target length:
 
