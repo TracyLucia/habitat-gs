@@ -450,7 +450,7 @@ void GaussianSplattingRenderer::initialize(
                 for (size_t c = 0; c < 3; ++c) {
                   size_t srcIdx = c * numCoeffs + m;
                   size_t dstIdx = i * shDim_ + 3 + (m * 3 + c);
-                  if (srcIdx < g.f_rest.size()) {
+                  if (srcIdx < g.f_rest_size) {
                     shsChunk[dstIdx] = g.f_rest[srcIdx];
                   }
                 }
@@ -545,7 +545,7 @@ void GaussianSplattingRenderer::initialize(
               for (size_t c = 0; c < 3; ++c) {
                 const size_t srcIdx = c * numCoeffs + m;
                 const size_t dstIdx = i * shDim_ + 3 + (m * 3 + c);
-                if (srcIdx < g.f_rest.size()) {
+                if (srcIdx < g.f_rest_size) {
                   shsChunk[dstIdx] = g.f_rest[srcIdx];
                 }
               }

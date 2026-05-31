@@ -47,7 +47,7 @@ class GaussianSplattingImporter : public Mn::Trade::AbstractImporter {
     std::vector<Magnum::Vector3> positions;
     std::vector<Magnum::Vector3> normals;
     std::vector<Magnum::Vector3> sh_dc;
-    std::vector<std::vector<float>> sh_rest;
+    std::vector<float> sh_rest;
     std::vector<float> opacities;
     std::vector<Magnum::Vector3> scales;
     std::vector<Magnum::Quaternion> rotations;
@@ -151,7 +151,7 @@ class GaussianSplattingImporter : public Mn::Trade::AbstractImporter {
   /**
    * @brief Get all loaded Gaussian SH rest coefficients
    */
-  const std::vector<std::vector<float>>& getSHRest() const { 
+  const std::vector<float>& getSHRest() const { 
     return sh_rest_; 
   }
 
@@ -315,7 +315,7 @@ class GaussianSplattingImporter : public Mn::Trade::AbstractImporter {
   std::vector<Magnum::Vector3> sh_dc_;
 
   //! Loaded Gaussian SH rest coefficients
-  std::vector<std::vector<float>> sh_rest_;
+  std::vector<float> sh_rest_;
 
   //! Loaded Gaussian opacities
   std::vector<float> opacities_;

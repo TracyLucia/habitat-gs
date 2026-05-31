@@ -1743,12 +1743,20 @@ bool ResourceManager::loadRenderAssetGaussianSplatting(const AssetInfo& info) {
     }
   };
 
-  auto copySHRest = [](const std::vector<float>& src) {
-    Corrade::Containers::Array<float> dst{src.size()};
-    for (size_t i = 0; i < src.size(); ++i) {
-      dst[i] = src[i];
+  auto copySHRest = [](GaussianSplat& splat,
+                       const GaussianSplattingImporter::GaussianSetData& set,
+                       size_t i) {
+    const size_t offset = i * set.shRestCount;
+    if (set.shRestCount == 0 || offset >= set.sh_rest.size()) {
+      splat.f_rest_size = 0;
+      return;
     }
-    return dst;
+    const size_t count =
+        std::min(set.shRestCount, GaussianSplat::kMaxSHRestCount);
+    splat.f_rest_size = count;
+    for (size_t j = 0; j < count; ++j) {
+      splat.f_rest[j] = set.sh_rest[offset + j];
+    }
   };
 
   auto addStaticSet = [&](const GaussianSplattingImporter::GaussianSetData& set) {
@@ -1771,9 +1779,7 @@ bool ResourceManager::loadRenderAssetGaussianSplatting(const AssetInfo& info) {
         splat.rotationR = set.rotationsR[i];
         splat.hasRotationR = true;
       }
-      if (i < set.sh_rest.size()) {
-        splat.f_rest = copySHRest(set.sh_rest[i]);
-      }
+      copySHRest(splat, set, i);
       gaussianData->addStaticGaussian(std::move(splat));
       updateBoundingBox(splat.position);
     }
@@ -1821,9 +1827,7 @@ bool ResourceManager::loadRenderAssetGaussianSplatting(const AssetInfo& info) {
         }
       }
       splat.motionDim = std::max(3, set.motionStride);
-      if (i < set.sh_rest.size()) {
-        splat.f_rest = copySHRest(set.sh_rest[i]);
-      }
+      copySHRest(splat, set, i);
       gaussianData->addDynamicGaussian(std::move(splat));
       updateBoundingBox(splat.position);
     }
@@ -1835,6 +1839,7 @@ bool ResourceManager::loadRenderAssetGaussianSplatting(const AssetInfo& info) {
   if (hasBackground) {
     addStaticSet(bgSet);
   }
+  gaussianSplattingImporter_->close();
 
   gaussianData->BB = boundingBox;
 

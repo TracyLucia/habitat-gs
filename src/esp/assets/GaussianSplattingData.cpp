@@ -25,8 +25,8 @@ void GaussianSplattingData::addGaussian(GaussianSplat&& splat) {
 
 void GaussianSplattingData::addStaticGaussian(GaussianSplat&& splat) {
   hasRotationR_ = hasRotationR_ || splat.hasRotationR;
-  maxShRestCount_ = std::max(maxShRestCount_, splat.f_rest.size());
-  shRestCountStatic_ = std::max(shRestCountStatic_, splat.f_rest.size());
+  maxShRestCount_ = std::max(maxShRestCount_, splat.f_rest_size);
+  shRestCountStatic_ = std::max(shRestCountStatic_, splat.f_rest_size);
   gaussians3D_.push_back(std::move(splat));
   if (layout_ == Layout::k4D && !gaussians4D_.empty()) {
     layout_ = Layout::kHybrid;
@@ -37,8 +37,8 @@ void GaussianSplattingData::addStaticGaussian(GaussianSplat&& splat) {
 void GaussianSplattingData::addDynamicGaussian(GaussianSplat4D&& splat) {
   motionStride_ = std::max(motionStride_, splat.motionDim);
   hasRotationR_ = hasRotationR_ || splat.hasRotationR;
-  maxShRestCount_ = std::max(maxShRestCount_, splat.f_rest.size());
-  shRestCountDynamic_ = std::max(shRestCountDynamic_, splat.f_rest.size());
+  maxShRestCount_ = std::max(maxShRestCount_, splat.f_rest_size);
+  shRestCountDynamic_ = std::max(shRestCountDynamic_, splat.f_rest_size);
   gaussians4D_.push_back(std::move(splat));
   if (layout_ == Layout::k3D && !gaussians3D_.empty()) {
     layout_ = Layout::kHybrid;
@@ -66,8 +66,8 @@ const std::vector<GaussianSplat>& GaussianSplattingData::getGaussians() const {
     dst.rotation = src.rotation;
     dst.rotationR = src.rotationR;
     dst.hasRotationR = src.hasRotationR;
-    dst.f_rest = Corrade::Containers::Array<float>(src.f_rest.size());
-    for (size_t i = 0; i < src.f_rest.size(); ++i) {
+    dst.f_rest_size = src.f_rest_size;
+    for (size_t i = 0; i < src.f_rest_size; ++i) {
       dst.f_rest[i] = src.f_rest[i];
     }
     return dst;

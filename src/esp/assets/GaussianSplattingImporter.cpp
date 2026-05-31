@@ -8,6 +8,7 @@
 #include <Magnum/MeshTools/Compile.h>
 #include <Magnum/Trade/MeshData.h>
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <algorithm>
 
+#include "GaussianSplattingData.h"
 #include "esp/core/Esp.h"
 // Use the miniz implementation bundled with assimp for NPZ zip handling.
 #include "deps/assimp/contrib/zip/src/miniz.h"
@@ -645,7 +647,8 @@ bool GaussianSplattingImporter::loadTemporalNpz(mz_zip_archive& zip,
   foregroundData_.positions.reserve(foregroundData_.count);
   foregroundData_.normals.assign(foregroundData_.count, Mn::Vector3{0.0f});
   foregroundData_.sh_dc.reserve(foregroundData_.count);
-  foregroundData_.sh_rest.reserve(foregroundData_.count);
+  foregroundData_.sh_rest.reserve(
+      foregroundData_.count * foregroundData_.shRestCount);
   foregroundData_.opacities.reserve(foregroundData_.count);
   foregroundData_.scales.reserve(foregroundData_.count);
   foregroundData_.rotations.reserve(foregroundData_.count);
@@ -734,7 +737,8 @@ bool GaussianSplattingImporter::loadTemporalNpz(mz_zip_archive& zip,
         }
       }
     }
-    foregroundData_.sh_rest.push_back(std::move(rest));
+    foregroundData_.sh_rest.insert(foregroundData_.sh_rest.end(),
+                                   rest.begin(), rest.end());
     if (!semanticFlat.empty() && semanticWidth > 0) {
       auto& dst = foregroundData_.semantics[i];
       const size_t base = i * semanticWidth;
@@ -928,7 +932,8 @@ bool GaussianSplattingImporter::loadInteractiveNpz(mz_zip_archive& zip,
     foregroundData_.positions.reserve(foregroundData_.count);
     foregroundData_.normals.assign(foregroundData_.count, Mn::Vector3{0.0f});
     foregroundData_.sh_dc.reserve(foregroundData_.count);
-    foregroundData_.sh_rest.reserve(foregroundData_.count);
+    foregroundData_.sh_rest.reserve(
+        foregroundData_.count * foregroundData_.shRestCount);
     foregroundData_.opacities.reserve(foregroundData_.count);
     foregroundData_.scales.reserve(foregroundData_.count);
     foregroundData_.rotations.reserve(foregroundData_.count);
@@ -1018,7 +1023,8 @@ bool GaussianSplattingImporter::loadInteractiveNpz(mz_zip_archive& zip,
           }
         }
       }
-      foregroundData_.sh_rest.push_back(std::move(rest));
+      foregroundData_.sh_rest.insert(foregroundData_.sh_rest.end(),
+                                     rest.begin(), rest.end());
       if (!semanticFlat.empty() && semanticWidth > 0) {
         auto& dst = foregroundData_.semantics[i];
         const size_t base = i * semanticWidth;
@@ -1118,7 +1124,8 @@ bool GaussianSplattingImporter::loadInteractiveNpz(mz_zip_archive& zip,
     backgroundData_.positions.reserve(backgroundData_.count);
     backgroundData_.normals.assign(backgroundData_.count, Mn::Vector3{0.0f});
     backgroundData_.sh_dc.reserve(backgroundData_.count);
-    backgroundData_.sh_rest.reserve(backgroundData_.count);
+    backgroundData_.sh_rest.reserve(
+        backgroundData_.count * backgroundData_.shRestCount);
     backgroundData_.opacities.reserve(backgroundData_.count);
     backgroundData_.scales.reserve(backgroundData_.count);
     backgroundData_.rotations.reserve(backgroundData_.count);
@@ -1177,7 +1184,8 @@ bool GaussianSplattingImporter::loadInteractiveNpz(mz_zip_archive& zip,
           }
         }
       }
-      backgroundData_.sh_rest.push_back(std::move(rest));
+      backgroundData_.sh_rest.insert(backgroundData_.sh_rest.end(),
+                                     rest.begin(), rest.end());
     }
   }
 
@@ -1228,7 +1236,7 @@ void GaussianSplattingImporter::rebuildCombinedBuffers() {
   positions_.reserve(gaussianCount_);
   normals_.reserve(gaussianCount_);
   sh_dc_.reserve(gaussianCount_);
-  sh_rest_.reserve(gaussianCount_);
+  sh_rest_.reserve(gaussianCount_ * shRestCount_);
   opacities_.reserve(gaussianCount_);
   scales_.reserve(gaussianCount_);
   rotations_.reserve(gaussianCount_);
@@ -1246,14 +1254,13 @@ void GaussianSplattingImporter::rebuildCombinedBuffers() {
                                                 : Mn::Vector3{0.0f});
       sh_dc_.push_back(i < set.sh_dc.size() ? set.sh_dc[i]
                                             : Mn::Vector3{0.0f});
-      std::vector<float> rest(shRestCount_, 0.0f);
-      if (i < set.sh_rest.size()) {
-        const auto& src = set.sh_rest[i];
-        for (size_t j = 0; j < std::min(rest.size(), src.size()); ++j) {
-          rest[j] = src[j];
-        }
+      const size_t srcOffset = i * set.shRestCount;
+      for (size_t j = 0; j < shRestCount_; ++j) {
+        const size_t src = srcOffset + j;
+        sh_rest_.push_back(j < set.shRestCount && src < set.sh_rest.size()
+                               ? set.sh_rest[src]
+                               : 0.0f);
       }
-      sh_rest_.push_back(std::move(rest));
 
       opacities_.push_back(i < set.opacities.size() ? set.opacities[i] : 1.0f);
       scales_.push_back(i < set.scales.size() ? set.scales[i]
@@ -1306,7 +1313,7 @@ bool GaussianSplattingImporter::readBinaryData(std::ifstream& file) {
   set.positions.reserve(gaussianCount_);
   set.normals.reserve(gaussianCount_);
   set.sh_dc.reserve(gaussianCount_);
-  set.sh_rest.reserve(gaussianCount_);
+  set.sh_rest.reserve(gaussianCount_ * set.shRestCount);
   set.opacities.reserve(gaussianCount_);
   set.scales.reserve(gaussianCount_);
   set.rotations.reserve(gaussianCount_);
@@ -1330,7 +1337,7 @@ bool GaussianSplattingImporter::readBinaryData(std::ifstream& file) {
     float nx = 0.0f, ny = 0.0f, nz = 0.0f;
     Mn::Vector3 fdc{0.0f};
     bool hasFdc = false;
-    std::vector<float> fRest(shRestCount_, 0.0f);
+    std::array<float, GaussianSplat::kMaxSHRestCount> fRest{};
     float opacity = 1.0f;
     Mn::Vector3 scale{0.0f};
     float rot[4] = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -1423,7 +1430,8 @@ bool GaussianSplattingImporter::readBinaryData(std::ifstream& file) {
     set.positions.emplace_back(x, y, z);
     set.normals.emplace_back(nx, ny, nz);
     set.sh_dc.emplace_back(fdc);
-    set.sh_rest.push_back(std::move(fRest));
+    set.sh_rest.insert(set.sh_rest.end(), fRest.begin(),
+                       fRest.begin() + std::min(shRestCount_, fRest.size()));
     set.opacities.push_back(opacity);
     set.scales.emplace_back(scale);
     set.rotations.emplace_back(Magnum::Vector3(rot[1], rot[2], rot[3]),
@@ -1450,8 +1458,6 @@ bool GaussianSplattingImporter::readBinaryData(std::ifstream& file) {
     foregroundData_ = GaussianSetData{};
   }
   isHybrid_ = false;
-  rebuildCombinedBuffers();
-
   ESP_DEBUG() << "Successfully read" << gaussianCount_ << "Gaussians";
   return true;
 }

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 """
 Interactive Habitat-GS viewer with RGB/depth rendering, avatar debugging,
 physics stepping, and object manipulation.
@@ -7,6 +6,8 @@ physics stepping, and object manipulation.
 Usage:
     python gaussian_viewer.py --input /path/to/3dgs/file.ply
 """
+
+from __future__ import annotations
 
 import argparse
 import ctypes
@@ -17,6 +18,21 @@ import string
 import sys
 import time
 from typing import Any, Dict, Optional
+
+
+def _configure_nvidia_glvnd() -> None:
+    """Prefer NVIDIA GL/EGL for CUDA-OpenGL interop when available."""
+    if sys.platform != "linux":
+        return
+
+    nvidia_egl_vendor = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+    if os.path.exists(nvidia_egl_vendor):
+        os.environ.pop("__EGL_VENDOR_LIBRARY_DIRS", None)
+        os.environ.setdefault("__EGL_VENDOR_LIBRARY_FILENAMES", nvidia_egl_vendor)
+        os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+
+
+_configure_nvidia_glvnd()
 
 flags = sys.getdlopenflags()
 sys.setdlopenflags(flags | ctypes.RTLD_GLOBAL)
@@ -66,11 +82,13 @@ class GaussianViewer(Application):
         start_time: Optional[float] = None,
         time_rate: float = 1.0,
         autoplay: Optional[bool] = None,
+        hfov: float = 90.0,
     ) -> None:
         self.gaussian_file = gaussian_file
         self.dataset = dataset
         self.scene = scene
         self.enable_physics = enable_physics
+        self.hfov = hfov
 
         # Initialize logging early so INFO logs in initialization are visible
         LoggingContext.reinitialize_from_env()
@@ -235,14 +253,14 @@ class GaussianViewer(Application):
         color_sensor_spec.sensor_type = habitat_sim.SensorType.COLOR
         color_sensor_spec.resolution = [self.framebuffer_size[1], self.framebuffer_size[0]]
         color_sensor_spec.position = [0.0, 0.0, 0.0]
-        color_sensor_spec.hfov = 90.0
+        color_sensor_spec.hfov = self.hfov
 
         depth_sensor_spec = habitat_sim.CameraSensorSpec()
         depth_sensor_spec.uuid = "depth_sensor"
         depth_sensor_spec.sensor_type = habitat_sim.SensorType.DEPTH
         depth_sensor_spec.resolution = [self.framebuffer_size[1], self.framebuffer_size[0]]
         depth_sensor_spec.position = [0.0, 0.0, 0.0]
-        depth_sensor_spec.hfov = 90.0
+        depth_sensor_spec.hfov = self.hfov
         # Depth output should be single-channel
         depth_sensor_spec.channels = 1
 
@@ -1121,10 +1139,20 @@ class GaussianViewer(Application):
         event.accepted = True
         self.redraw()
 
-    def pointer_move_event(self, event: Application.PointerMoveEvent) -> None:
+    def _event_left_button_pressed(self, event: Any) -> bool:
+        if hasattr(event, "pointers"):
+            return bool(event.pointers & Application.Pointer.MOUSE_LEFT)
+        return bool(event.buttons & Application.MouseMoveEvent.Buttons.LEFT)
+
+    def _event_is_right_button(self, event: Any) -> bool:
+        if hasattr(event, "pointer"):
+            return event.pointer == Application.Pointer.MOUSE_RIGHT
+        return event.button == Application.MouseEvent.Button.RIGHT
+
+    def _handle_pointer_move(self, event: Any) -> None:
         """Handle mouse movement for camera look and object dragging."""
         if (
-            event.pointers & Application.Pointer.MOUSE_LEFT
+            self._event_left_button_pressed(event)
             and self.mouse_interaction == MouseMode.LOOK
         ):
             agent = self.sim.agents[self.agent_id]
@@ -1142,7 +1170,13 @@ class GaussianViewer(Application):
         self.redraw()
         event.accepted = True
 
-    def pointer_press_event(self, event: Application.PointerEvent) -> None:
+    def pointer_move_event(self, event: Application.PointerMoveEvent) -> None:
+        self._handle_pointer_move(event)
+
+    def mouse_move_event(self, event: Application.MouseMoveEvent) -> None:
+        self._handle_pointer_move(event)
+
+    def _handle_pointer_press(self, event: Any) -> None:
         """Create a point-to-point or fixed constraint on clicked physics objects."""
         physics_enabled = self.sim.get_physics_simulation_library()
 
@@ -1202,7 +1236,7 @@ class GaussianViewer(Application):
                         constraint_settings.frame_b = node.rotation.to_matrix()
                         constraint_settings.pivot_b = hit_info.point
 
-                        if event.pointer == Application.Pointer.MOUSE_RIGHT:
+                        if self._event_is_right_button(event):
                             constraint_settings.constraint_type = (
                                 physics.RigidConstraintType.Fixed
                             )
@@ -1222,7 +1256,13 @@ class GaussianViewer(Application):
         self.redraw()
         event.accepted = True
 
-    def scroll_event(self, event: Application.ScrollEvent) -> None:
+    def pointer_press_event(self, event: Application.PointerEvent) -> None:
+        self._handle_pointer_press(event)
+
+    def mouse_press_event(self, event: Application.MouseEvent) -> None:
+        self._handle_pointer_press(event)
+
+    def _handle_scroll(self, event: Any) -> None:
         """Zoom cameras in LOOK mode or adjust the grab constraint in GRAB mode."""
         scroll_mod_val = (
             event.offset.y
@@ -1261,11 +1301,23 @@ class GaussianViewer(Application):
         self.redraw()
         event.accepted = True
 
-    def pointer_release_event(self, event: Application.PointerEvent) -> None:
+    def scroll_event(self, event: Application.ScrollEvent) -> None:
+        self._handle_scroll(event)
+
+    def mouse_scroll_event(self, event: Application.MouseScrollEvent) -> None:
+        self._handle_scroll(event)
+
+    def _handle_pointer_release(self, event: Any) -> None:
         """Release any active mouse grab constraint."""
         del self.mouse_grabber
         self.mouse_grabber = None
         event.accepted = True
+
+    def pointer_release_event(self, event: Application.PointerEvent) -> None:
+        self._handle_pointer_release(event)
+
+    def mouse_release_event(self, event: Application.MouseEvent) -> None:
+        self._handle_pointer_release(event)
 
     def update_grab_position(self, point: mn.Vector2i) -> None:
         """Update the target transform of the active mouse constraint."""
@@ -1527,6 +1579,7 @@ def main() -> int:
     parser.add_argument(
         "--dataset",
         type=str,
+        metavar="PATH",
         required=False,
         help="Path to scene_dataset_config.json (enables stage-based loading)",
     )
@@ -1547,6 +1600,21 @@ def main() -> int:
         type=int,
         default=600,
         help="Window height (default: 600)",
+    )
+    parser.add_argument(
+        "--hfov",
+        type=float,
+        default=90.0,
+        help="Horizontal field of view in degrees (default: 90.0)",
+    )
+    parser.add_argument(
+        "--vfov",
+        type=float,
+        default=None,
+        help=(
+            "Vertical field of view in degrees. If set, converts to the "
+            "horizontal FOV used by Habitat from --width/--height."
+        ),
     )
     parser.add_argument(
         "--depth-min",
@@ -1599,6 +1667,10 @@ def main() -> int:
     args = parser.parse_args()
 
     # Validate inputs (dataset+scene preferred; otherwise require PLY)
+    if args.dataset is not None and args.scene is None:
+        parser.error("--dataset requires --scene SCENE")
+    if args.scene is not None and args.dataset is None:
+        parser.error("--scene requires --dataset PATH")
     if args.dataset and args.scene:
         if not os.path.exists(args.dataset):
             logger.error(f"Dataset config not found: {args.dataset}")
@@ -1627,6 +1699,21 @@ def main() -> int:
     logger.info(f"Depth clipping percentiles: [{args.depth_clip_min}%, {args.depth_clip_max}%]")
     logger.info("Press H for controls, TAB for RGB/depth mode switching")
 
+    hfov = args.hfov
+    if args.vfov is not None:
+        aspect = args.width / args.height
+        hfov = math.degrees(
+            2.0 * math.atan(aspect * math.tan(math.radians(args.vfov) * 0.5))
+        )
+        logger.info(
+            "Converted vertical FOV %.3f deg to horizontal FOV %.3f deg "
+            "for %dx%d",
+            args.vfov,
+            hfov,
+            args.width,
+            args.height,
+        )
+
     # Create and run viewer
     viewer = GaussianViewer(
         args.input, 
@@ -1640,6 +1727,7 @@ def main() -> int:
         time_rate=args.time_rate,
         autoplay=args.playback,
         enable_physics=bool(args.enable_physics),
+        hfov=hfov,
     )
     if viewer.sim is None:
         return 1

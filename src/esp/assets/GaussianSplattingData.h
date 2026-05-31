@@ -12,6 +12,8 @@
 #include <Magnum/Math/Quaternion.h>
 #include <Magnum/Math/Vector3.h>
 
+#include <array>
+
 #include "BaseMesh.h"
 #include "esp/core/Esp.h"
 
@@ -24,6 +26,8 @@ namespace assets {
  * @brief Base structure representing a single 3D Gaussian Splat.
  */
 struct GaussianSplat {
+  static constexpr size_t kMaxSHRestCount = 45;
+
   //! Position of the Gaussian center
   Mn::Vector3 position;
 
@@ -35,7 +39,8 @@ struct GaussianSplat {
 
   //! Spherical harmonics higher-order coefficients (45 floats for degree 3)
   //! f_rest_0 to f_rest_44
-  Corrade::Containers::Array<float> f_rest;
+  std::array<float, kMaxSHRestCount> f_rest{};
+  size_t f_rest_size = 0;
 
   //! Opacity of the Gaussian
   float opacity;
@@ -58,24 +63,24 @@ struct GaussianSplat {
   GaussianSplat() : opacity(1.0f) {}
 
   /**
-   * @brief Move constructor (required because Array is move-only)
+   * @brief Move constructor.
    */
   GaussianSplat(GaussianSplat&&) noexcept = default;
 
   /**
-   * @brief Move assignment operator (required because Array is move-only)
+   * @brief Move assignment operator.
    */
   GaussianSplat& operator=(GaussianSplat&&) noexcept = default;
 
   /**
-   * @brief Deleted copy constructor (cannot copy Array)
+   * @brief Copy constructor.
    */
-  GaussianSplat(const GaussianSplat&) = delete;
+  GaussianSplat(const GaussianSplat&) = default;
 
   /**
-   * @brief Deleted copy assignment (cannot copy Array)
+   * @brief Copy assignment.
    */
-  GaussianSplat& operator=(const GaussianSplat&) = delete;
+  GaussianSplat& operator=(const GaussianSplat&) = default;
 };
 
 /**
